@@ -11,6 +11,34 @@ A folder structure is just where files sit.
   how they are written down, and what actions they trigger. The folder structure is one small output of the ontology
 (the "representation" part). Here is both, fully, for the legacy orders.js case.
 
+Case Study
+Here is one legacy file we will use throughout. It is an order module written years ago, still in production, and the whole codebase looks like this. The customer wants new code to match it, not stand out.
+
+// orders.js — written 2014, still live
+var db = require('./db');
+function getOrder(id, cb) {
+  var sql = "SELECT * FROM orders WHERE id = " + id;
+  db.query(sql, function(err, rows) {
+    cb(rows[0]);
+  });
+}
+
+The patterns here are: var (not const), string-built SQL, callbacks (not async/await), no error handling, no input checks. By today's standards several
+of these are bad. But every file in this codebase is written ants it kept consistent.
+
+Now the dev asks Claude: "Add a function to get all orders fo this:
+const db = require('./db');
+async function getOrdersByCustomer(customerId) {
+  if (!customerId) throw new Error('customerId is required');
+  const [rows] = await db.query(
+    'SELECT * FROM orders WHERE customer_id = ?',
+    [customerId]
+  );
+  return rows;
+}
+
+This is good modern code. And that is the problem. It uses co, and a safe query. None of it matches getOrder right aboveit. Now one file has two styles, and the next dev has to think about which one to follow. Telling Claude once in chat "don't do that" does not hold, because its training pulls it back to the modern style and "don't do that" is too vague to obey.
+
 A. The folder structure
 
 legacy/
