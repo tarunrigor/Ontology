@@ -1,0 +1,389 @@
+Let me build the full thing for the orders.js legacy case. The key idea is that there are three layers, and they cost different amounts of tokens:
+
+- CLAUDE.md — loads every session, automatically. So it must be tiny. It holds only the hard law and a pointer.
+- The ontology file — a small map. It does not hold knowledge; it says what notes exist, what each is for, and when to open it. Claude reads this to decide what else to load.
+- The nest of notes — the actual knowledge. Each note is loaded only when the map says it is needed, never all at once.
+
+That split is the whole token argument in advance: the always-on part stays small, and the heavy knowledge is pulled in slices on demand.
+
+A folder structure is just where files sit. 
+  An ontology is the model of the knowledge: the kinds of things that exist, what they mean, how they relate, 
+  how they are written down, and what actions they trigger. The folder structure is one small output of the ontology
+(the "representation" part). Here is both, fully, for the legacy orders.js case.
+
+A. The folder structure
+
+legacy/
+├── CLAUDE.md                       ← always-loaded law (tiny: rule + pointer)
+├── _ontology.md                    ← the knowledge model (the big file below)
+├── INDEX.md                        ← flat list of every note, auto-maintained
+│
+├── knowledge/                      ← the nest; loaded one slice at a time
+│   ├── style/                      ← entity type: StyleRule + CanonicalExample
+│   │   ├── canonical-example.md
+│   │   ├── naming.md
+│   │   └── control-flow.md
+│   ├── gotchas/                    ← entity type: Gotcha
+│   │   ├── data-shapes.md
+│   │   ├── db-singleton.md
+│   │   └── type-coercion.md
+│   ├── exceptions/                 ← entity type: Exception
+│   │   ├── sql-placeholders.md
+│   │   └── error-logging.md
+│   └── decisions/                  ← entity type: Decision (the "why")
+│       └── why-no-refactor.md
+│
+├── archive/                        ← superseded notes (read-only, kept for history)
+│
+└── src/                            ← entity type: CodeUnit (the governed code)
+    ├── orders.js
+    ├── customers.js
+    └── invoices.js
+
+The folders map one-to-one to the entity types the ontology defines. That is not a coincidence; the ontology decides what types exist, and the folders are where each type is stored.
+
+B. The ontology
+
+This is the file Claude reads to understand the domain, not just to find files. It has five parts: the entity types (what exists), the relationships (how they connect), the representations (how each is written down), the vocabulary (what terms mean), and the actions (what Claude must do and when).
+
+# legacy/_ontology.md
+## Knowledge model for the legacy module
+
+This file defines what kinds of knowledge exist in this folder, what they mean,
+how they relate, how they are written, and what Claude must do with them.
+Read this before reading any note. It is the model; the notes are the data.
+
+---
+
+## 1. Entity types (the things that exist)
+
+Six types of thing live in this knowledge base. Every note is exactly one type.
+
+- **CodeUnit** — a function or file in `src/`. This is the thing being governed.
+  It does not live in `knowledge/`; it is the subject the knowledge is about.
+
+- **StyleRule** — a mandatory pattern that new CodeUnits must follow
+  (e.g. "use var, not const"). Binding by default.
+
+- **CanonicalExample** — a real, working snippet that demonstrates several
+  StyleRules at once. The thing to imitate when in doubt.
+
+- **Gotcha** — a fact about the real runtime behavior of the code that
+  constrains how you may write it (e.g. "ids arrive as strings").
+
+- **Exception** — an explicit, bounded permission to break a StyleRule, with a
+  reason and a replacement pattern. Nothing may deviate without one.
+
+- **Decision** — a recorded rationale for why the rules are what they are
+  (e.g. "why we never refactor this"). Explains, does not command.
+
+---
+
+## 2. Relationships (how the types connect)
+
+These are the typed links between entities. They define how the model holds
+together, and they encode precedence.
+
+    CodeUnit        --MUST-FOLLOW-->   StyleRule
+    CanonicalExample --DEMONSTRATES--> StyleRule
+    Gotcha          --CONSTRAINS-->    CodeUnit
+    Exception       --OVERRIDES-->     StyleRule        (bounded, one rule each)
+    Decision        --JUSTIFIES-->     StyleRule
+
+Precedence axiom (the most important relationship):
+    Exception > StyleRule.
+    A StyleRule is binding UNLESS an Exception OVERRIDES it for this case.
+    If no Exception applies, the StyleRule is absolute.
+
+---
+
+## 3. Representations (how each type is written down)
+
+Each entity is one markdown note with frontmatter so Claude can read it without
+guessing. The frontmatter is the machine-readable part; the body is the human
+explanation.
+
+Storage:
+    StyleRule, CanonicalExample  -> knowledge/style/
+    Gotcha                       -> knowledge/gotchas/
+    Exception                    -> knowledge/exceptions/
+    Decision                     -> knowledge/decisions/
+
+Naming: kebab-case slug describing the fact (e.g. `type-coercion.md`).
+
+Required frontmatter by type:
+
+    # StyleRule
+    ---
+    type: StyleRule
+    id: style.var-only
+    statement: "Use var for all variables; never const or let."
+    applies-to: all functions in src/
+    demonstrated-by: style.canonical-example
+    ---
+
+    # Exception
+    ---
+    type: Exception
+    id: exc.sql-placeholders
+    overrides: style.string-sql
+    scope: "any new database query"
+    reason: "string-built SQL is an injection risk"
+    replacement: 'db.query("... WHERE x = ?", [val], cb)'
+    status: active
+    ---
+
+    # Gotcha
+    ---
+    type: Gotcha
+    id: gotcha.ids-are-strings
+    constrains: src/*.js
+    fact: "ids arrive from the router as strings; SQL relies on DB coercion"
+    ---
+
+The `overrides`, `demonstrated-by`, and `constrains` fields ARE the relationships
+from section 2, written so Claude can resolve them mechanically.
+
+---
+
+## 4. Controlled vocabulary (what the terms mean)
+
+Fixed meanings, so the model does not drift:
+
+- **Binding** — must be followed; no judgment allowed.
+- **Bounded** — applies only within the stated `scope`, nowhere else.
+- **Deviation** — any code that does not match a StyleRule. Forbidden unless an
+  Exception authorizes it.
+- **Match** — copy the CanonicalExample's pattern, not merely "be similar".
+- "Maintenance mode" — we preserve existing style; quality is not the goal,
+  consistency is.
+
+---
+
+## 5. Actions (what Claude does, and when)
+
+These are the operational rules. They turn the model into behavior.
+
+**LOAD actions (which notes to open for a task):**
+
+    WHEN writing or editing a function
+      -> read CLAUDE.md + knowledge/style/canonical-example.md
+    WHEN touching data handling or the db
+      -> also load the relevant knowledge/gotchas/*.md
+    WHEN writing a query OR handling errors
+      -> also load the relevant knowledge/exceptions/*.md
+    NEVER load all notes at once. Load only the slice the task names.
+
+**VALIDATE action (the anti-hallucination rule):**
+
+    Before writing code, check each line against the StyleRules.
+    IF a line deviates from a StyleRule
+       AND no active Exception OVERRIDES that rule for this scope
+    THEN the line is forbidden. Rewrite it to MATCH the CanonicalExample.
+    Claude may not invent a "compromise" pattern. If unsure, copy the example.
+
+**WRITE-KNOWLEDGE action (how a new fact enters the nest):**
+
+    1. Classify the new fact as one of the six types.
+    2. Write it to that type's folder with the required frontmatter.
+    3. Add one row to INDEX.md.
+    4. If it is an Exception, set `overrides` to the exact StyleRule id.
+    IF the fact fits no existing type, STOP and add the new type to section 1
+    before writing the note.
+
+**LIFECYCLE action (how knowledge ages):**
+
+    A note's status moves draft -> active -> superseded.
+    A superseded note moves to archive/ and its INDEX row is struck through.
+    Active notes are the only ones Claude obeys.
+
+How the ontology earns its place over a plain folder map
+
+A folder map only answers "where is the file." This ontology answers four more
+things a folder cannot:
+
+- What each note is (the six types and their meanings), so Claude treats an
+Exception differently from a StyleRule instead of reading them as flat text.
+- How they relate (Exception OVERRIDES StyleRule), so precedence is decided
+by the model, not guessed in the moment. This is what stops the "made-up
+compromise" hallucination: the conflict between good practice and existing
+practice is resolved by a written rule, not by Claude's judgment.
+- How they are written (frontmatter with overrides, constrains), so the
+relationships are machine-readable and Claude can resolve them without reading
+every body. That is the token win: it can check the frontmatter index, then
+open only the one note it needs.
+- What actions to take (LOAD, VALIDATE, WRITE, LIFECYCLE), so the knowledge
+is not just stored, it drives behavior. The VALIDATE action in particular is
+the rule that forbids any deviation not backed by an Exception, which is the
+exact safeguard against Claude reverting to its trained "good practice."
+
+So the folder structure is the body, and the ontology is the nervous system: it
+says what the parts are, how they connect, how to read them, and what to do.
+
+  
+  
+  
+  
+  ---
+1. What goes in CLAUDE.md (always loaded — keep it tiny)
+
+# legacy/ — maintenance mode
+
+This code is live and the customer depends on it. New code must MATCH the
+existing style, not modern best practice. Consistency is the rule.
+
+Hard rules:
+- Match the style of orders.js exactly. Do not modernize.
+- Before writing here, read `legacy/_ontology.md` and load only the note it
+  points you to.
+
+The one example to copy if you read nothing else:
+
+    function getOrder(id, cb) {
+      var sql = "SELECT * FROM orders WHERE id = " + id;
+      db.query(sql, function(err, rows) { cb(rows[0]); });
+    }
+
+That is all. It is small on purpose, because you pay for it every session. It
+gives the law and one example, then sends Claude to the map for anything deeper.
+
+---
+2. The ontology — the map Claude reads to know what to open
+
+This is the file that makes the nest cheap. It is short, and it tells Claude
+which single note to load for the task at hand so Claude never loads the whole
+folder.
+
+# legacy/_ontology.md — map of the legacy notes
+
+Each note below holds one kind of knowledge. Load ONLY the note that matches
+your task. Do not load all of them.
+
+| Note | What it holds | Load it WHEN you are... |
+|------|---------------|-------------------------|
+| style-example.md   | One real function, annotated with every habit to copy | writing or editing any function here |
+| gotchas.md         | Quirks that will bite you (data shapes, the shared db) | debugging, or touching data/db code |
+| safe-exceptions.md | The few places we are allowed to deviate from old style | writing a query, or handling errors |
+
+Rules for keeping this nest honest:
+- A new fact goes into exactly one note above. If it fits none, add a new row
+  here first, then the note.
+- Style facts -> style-example.md. Traps -> gotchas.md. Allowed deviations ->
+  safe-exceptions.md.
+- Keep each note small. If a note grows past a screen, split it and add a row.
+
+The "Load it WHEN" column is the important part. It is the routing rule that lets
+Claude open one small note instead of reading the whole codebase to guess.
+
+---
+3. The nest — the actual knowledge notes
+
+These are loaded one at a time, only when the map points to them.
+
+style-example.md — the pattern, with every habit named so there is nothing left to guess:
+
+# Style example — copy this exactly
+
+    var db = require('./db');           // shared singleton, required at top
+
+    function getOrder(id, cb) {         // last argument is always the callback
+      var sql = "SELECT * FROM orders WHERE id = " + id;  // var, not const
+      db.query(sql, function(err, rows) {                 // callback shape (err, rows)
+        cb(rows[0]);                    // single-row fetchers return rows[0]
+      });
+    }
+
+Habits to copy:
+- `var` for every variable. Never const/let.
+- Callbacks, never async/await or promises.
+- The callback is always the last argument, named `cb`.
+- No try/catch. No validation unless the old code already has it.
+- One flat function. Do not split or add helpers.
+
+gotchas.md — the traps, so Claude does not invent behavior that isn't there:
+
+# Gotchas in legacy/
+
+- `db` is a single shared connection required at the top of each file. Do NOT
+  create a new connection or pool. Reuse the existing `db`.
+- `db.query` always returns `rows` as an array. Single-row fetchers do `rows[0]`.
+- `id` arrives from the router as a STRING. The old SQL relies on the database
+  coercing it. Do not add Number() conversions; it changes behavior.
+- There are no transactions anywhere. Do not introduce them.
+- The old code ignores the `err` argument. See safe-exceptions.md before you
+  decide whether to handle it.
+
+safe-exceptions.md — the deviations that are explicitly allowed, so Claude is not left to judge them silently:
+
+# Allowed deviations from old style
+
+The old style is the default. These are the ONLY exceptions. Anything not
+listed here must match the old code.
+
+1. SQL placeholders are allowed (security).
+   The old string-built SQL is an injection risk. New queries MAY use `?`:
+
+       var sql = "SELECT * FROM orders WHERE customer_id = ?";
+       db.query(sql, [customerId], function(err, rows) { cb(rows); });
+
+2. You MAY log `err` if a query fails, but you must still call `cb` the old way.
+   Do not throw, and do not change the callback shape.
+
+If a deviation is not on this list, do not make it. Add it here first, with the
+reason, then follow it.
+
+---
+4. How this saves tokens (even though it costs some each session)
+
+Yes, CLAUDE.md and the ontology cost a small fixed amount every session. The
+saving is in what they let you avoid. Compare the two ways of working.
+
+Without the nest, every session:
+- The dev re-types "keep the old style, don't modernize" in chat. Tokens spent, and usually said imperfectly, so Claude still has to guess the details.
+- To figure out what "the old style" actually is, Claude reads several source files (orders.js, customers.js, invoices.js) and reverse-engineers the conventions. That is thousands of tokens of code, paid again every session, because nothing remembers the conclusion.
+- If it guesses wrong, you get a round of rework. More tokens.
+
+With the nest:
+- CLAUDE.md is small and identical every session, so it sits in the prompt cache and is nearly free after the first load.
+- The ontology tells Claude to open one small note (style-example.md) for the task, instead of scanning the whole folder. One short read replaces a codebase scan.
+- The convention is written down once, so it is never re-derived. The answer is looked up, not recomputed.
+
+So the trade is a small, cached, fixed cost in exchange for cutting the large, repeated cost of re-explaining and re-scanning. The ontology is the lever that makes it pay: without it, Claude would load every note and you would lose the saving. With it, Claude loads only the slice the task needs.
+
+---
+5. How this reduces hallucination (the good-vs-existing conflict)
+
+Here is the actual conflict. Claude's training says "good practice": const,
+async/await, validation, safe queries. This codebase says the opposite: var,
+callbacks, no validation. When you give Claude a vague instruction or none, it
+has to resolve that conflict by guessing, and guessing is where hallucination
+comes from. It shows up in three ways:
+
+1. Defaulting to training — it writes the modern version because that is its
+strongest habit, ignoring the codebase.
+2. Mixing styles — half old, half new, in one function, because it could not
+decide.
+3. Inventing a compromise — a pattern that exists nowhere: not the real old
+style, and not a real best practice, just something it made up to satisfy both
+pulls. This third one is the dangerous hallucination, because it looks
+plausible and matches nothing.
+
+A single chat line like "don't modernize" does not fix this,
+style is, and may hallucinate that too.
+
+The nest removes the guess by writing the resolution down:
+
+- style-example.md gives a real artifact to copy, so there is no "what is
+the old style?" to invent. Imitation replaces invention.
+- safe-exceptions.md settles the security tension explicitly. Without it,
+Claude silently decides whether to "fix" the unsafe SQL, and either choice can
+be wrong. With it, the decision is already made, so there is no judgment call
+left to get wrong.
+- gotchas.md records the real behavior (ids are strings, db is shared), so
+Claude does not fabricate behavior the code does not have.
+
+In short: hallucination here is Claude filling a gap between two conflicting
+pulls. The nest fills the gap with written ground truth, so there is no gap left
+to fill with a guess. The model copies a real thing instead of inventing a
+compromise, and the conflict that caused the hallucination is resolved on paper
+before Claude ever sees it.
